@@ -67,7 +67,10 @@ TEMPLATE = np.float32([
     (0.5240106503, 0.783370783245), (0.477561227414, 0.778476346951)])
 
 TPL_MIN, TPL_MAX = np.min(TEMPLATE, axis=0), np.max(TEMPLATE, axis=0)
-MINMAX_TEMPLATE = (TEMPLATE - TPL_MIN) / (TPL_MAX - TPL_MIN)
+MINMAX_TEMPLATE = (TEMPLATE - TPL_MIN) / (TPL_MAX - TPL_MIN)    # Clip everything to [0,1]
+
+
+
 
 def mkdirP(path):
     """
@@ -201,17 +204,19 @@ class AlignDlib:
 
     #: Landmark indices corresponding to the outer eyes and nose.
     OUTER_EYES_AND_NOSE = [36, 45, 33]
+    
 
     def __init__(self, facePredictor):
         """
         Instantiate an 'AlignDlib' object.
-
+    
         :param facePredictor: The path to dlib's
         :type facePredictor: str
         """
         assert facePredictor is not None
 
-        self.detector = dlib.get_frontal_face_detector()
+        detector_path = os.path.join(dlib_model_dir, 'mmod_human_face_detector.dat')
+        self.detector = dlib.cnn_face_detection_model_v1(detector_path)
         self.predictor = dlib.shape_predictor(facePredictor)
 
     def getAllFaceBoundingBoxes(self, rgbImg):
@@ -226,6 +231,9 @@ class AlignDlib:
         assert rgbImg is not None
 
         try:
+            rectangles = self.detector(rgbImg, 1)
+            if isinstance(rectangles, dlib.mmod_rectangles):
+                return [mmod.rect for mmod in rectangles]
             return self.detector(rgbImg, 1)
         except Exception as e:
             print("Warning: {}".format(e))
@@ -269,7 +277,7 @@ class AlignDlib:
     def align(self, imgDim, rgbImg, bb=None, pad=None, ts=None,
               landmarks=None, landmarkIndices=INNER_EYES_AND_BOTTOM_LIP,
               opencv_det=False, opencv_model="../model/opencv/cascade.xml",
-              only_crop=False):
+              only_crop=False, face_img_ratio=0.8):
         r"""align(imgDim, rgbImg, bb=None, landmarks=None, landmarkIndices=INNER_EYES_AND_BOTTOM_LIP)
 
         Transform and align a face in an image.
@@ -295,45 +303,48 @@ class AlignDlib:
         assert rgbImg is not None
         assert landmarkIndices is not None
 
-        if bb is None:
-            if opencv_det:
-                face_cascade = cv2.CascadeClassifier(opencv_model)
-                faces = face_cascade.detectMultiScale(rgbImg, 1.1, 2, minSize=(30, 30))
-                dlib_rects = []
-                for (x,y,w,h) in faces:
-                    dlib_rects.append(dlib.rectangle(int(x), int(y), int(x+w), int(y+h)))
-                    if len(faces) > 0:
-                        bb = max(dlib_rects, key=lambda rect: rect.width() * rect.height())
-                    else:
-                        bb = None
-            else:
-                bb = self.getLargestFaceBoundingBox(rgbImg)
-            if bb is None:
-                return
-            if pad is not None:
-                left = int(max(0, bb.left() - bb.width()*float(pad[0])))
-                top = int(max(0, bb.top() - bb.height()*float(pad[1])))
-                right = int(min(rgbImg.shape[1], bb.right() + bb.width()*float(pad[2])))
-                bottom = int(min(rgbImg.shape[0], bb.bottom()+bb.height()*float(pad[3])))
-                bb = dlib.rectangle(left, top, right, bottom)
-
         if landmarks is None:
+            if bb is None:
+                if opencv_det:
+                    face_cascade = cv2.CascadeClassifier(opencv_model)
+                    faces = face_cascade.detectMultiScale(rgbImg, 1.1, 2, minSize=(30, 30))
+                    dlib_rects = []
+                    for (x,y,w,h) in faces:
+                        dlib_rects.append(dlib.rectangle(int(x), int(y), int(x+w), int(y+h)))
+                        if len(faces) > 0:
+                            bb = max(dlib_rects, key=lambda rect: rect.width() * rect.height())
+                        else:
+                            bb = None
+                else:
+                    bb = self.getLargestFaceBoundingBox(rgbImg)
+                if bb is None:
+                    return
+                if pad is not None:
+
+                    left = int(max(0, bb.left() - bb.width()*float(pad[0])))
+                    top = int(max(0, bb.top() - bb.height()*float(pad[1])))
+                    right = int(min(rgbImg.shape[1], bb.right() + bb.width()*float(pad[2])))
+                    bottom = int(min(rgbImg.shape[0], bb.bottom()+bb.height()*float(pad[3])))
+                    bb = dlib.rectangle(left, top, right, bottom)
+
             landmarks = self.findLandmarks(rgbImg, bb)
 
         npLandmarks = np.float32(landmarks)
         npLandmarkIndices = np.array(landmarkIndices)
 
-        dstLandmarks = imgDim * MINMAX_TEMPLATE[npLandmarkIndices]
+        landmark_locs = MINMAX_TEMPLATE[npLandmarkIndices]
+        landmark_locs = (landmark_locs - 0.5) * face_img_ratio + 0.5
+        dstLandmarks = imgDim * landmark_locs
         if ts is not None:
             # reserve more area of forehead on a face
             dstLandmarks[(0,1),1] = dstLandmarks[(0,1),1] + imgDim * float(ts)
             dstLandmarks[2,1] = dstLandmarks[2,1] + imgDim * float(ts) / 2
         if not only_crop:
             H = cv2.getAffineTransform(npLandmarks[npLandmarkIndices],dstLandmarks)
-            return cv2.warpAffine(rgbImg, H, (imgDim, imgDim))
+            return cv2.warpAffine(rgbImg, H, (imgDim, imgDim), borderMode=cv2.BORDER_TRANSPARENT)
         else:
-            return rgbImg[top:bottom, left:right] # crop is rgbImg[y: y + h, x: x + w]
-
+            rgbImg = rgbImg[top:bottom, left:right] # crop is rgbImg[y: y + h, x: x + w]
+            return cv2.imresize(rgbImg, (imgDim, imgDim)) 
 
 def write(vals, fName):
     if os.path.isfile(fName):
