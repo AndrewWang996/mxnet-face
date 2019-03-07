@@ -204,6 +204,9 @@ class AlignDlib:
 
     #: Landmark indices corresponding to the outer eyes and nose.
     OUTER_EYES_AND_NOSE = [36, 45, 33]
+
+    #: Landmark indices corresponding to the outer eyes and bottom lip.
+    OUTER_EYES_AND_BOTTOM_LIP = [36, 45, 57]
     
 
     def __init__(self, facePredictor):
