@@ -24,6 +24,7 @@ import numpy as np
 import os,errno
 import random
 import shutil
+import tensorflow as tf
 
 file_dir = os.path.dirname(os.path.realpath(__file__))
 modelDir = os.path.join(file_dir, '..', 'model')
@@ -202,12 +203,20 @@ class AlignDlib:
     #: Landmark indices corresponding to the inner eyes and bottom lip.
     INNER_EYES_AND_BOTTOM_LIP = [39, 42, 57]
 
+    #: Landmark indices corresponding to the inner eyes and nose.
+    INNER_EYES_AND_NOSE = [39, 42, 33]    
+
     #: Landmark indices corresponding to the outer eyes and nose.
     OUTER_EYES_AND_NOSE = [36, 45, 33]
 
     #: Landmark indices corresponding to the outer eyes and bottom lip.
     OUTER_EYES_AND_BOTTOM_LIP = [36, 45, 57]
-    
+
+    #: Landmark indices corresponding to left eye
+    LEFT_EYES = [36, 37, 38, 39, 40, 41]
+
+    #: Landmark indices corresponding to right eye
+    RIGHT_EYES = [42, 43, 44, 45, 46, 47]
 
     def __init__(self, facePredictor):
         """
@@ -347,7 +356,79 @@ class AlignDlib:
             return cv2.warpAffine(rgbImg, H, (imgDim, imgDim), borderMode=cv2.BORDER_TRANSPARENT)
         else:
             rgbImg = rgbImg[top:bottom, left:right] # crop is rgbImg[y: y + h, x: x + w]
-            return cv2.imresize(rgbImg, (imgDim, imgDim)) 
+            return cv2.imresize(rgbImg, (imgDim, imgDim))
+
+ 
+    def align_frontalized_img(self, imgDim, rgbImg, landmarks, face_img_ratio=0.75):
+        r"""
+        Transform and align a frontal face in an image.
+        IMPORTANT ASSUMPTION: Face is frontalized
+
+        :param imgDim: The edge length in pixels of the square the image is resized to.
+        :type imgDim: int
+        :param rgbImg: RGB tensor to process. Shape: (160, 160, 3)
+        :type rgbImg: numpy.ndarray
+        :param landmarks: Detected landmark locations. \
+                          Landmarks found on `bb` if not provided.
+        :type landmarks: list of (x,y) tuples
+        :return: The aligned RGB image. Shape: (imgDim, imgDim, 3)
+        :rtype: numpy.ndarray
+        """
+        assert imgDim is not None
+        assert rgbImg is not None
+        
+        # Pad input image with 160 border (adds 320 to height + width)
+        paddings = tf.constant([[imgDim, imgDim], [imgDim, imgDim], [0,0]])
+        rgbImg = tf.pad(rgbImg, paddings)
+    
+        # Update landmark locations correspondingly
+        landmarks = imgDim + landmarks        
+
+        # Calculate center of mass for left and right eyes
+        eye_L = tf.reduce_mean(
+            tf.gather(landmarks, AlignDlib.LEFT_EYES),
+            axis=0
+        )
+        eye_R = tf.reduce_mean(
+            tf.gather(landmarks, AlignDlib.RIGHT_EYES),
+            axis=0
+        )
+        
+        # Calculate face center & height based on landmark locations
+        landmarks_max = tf.reduce_max(landmarks, axis=0)
+        landmarks_min = tf.reduce_min(landmarks, axis=0)
+        face_height = landmarks_max[1] - landmarks_min[1] 
+        
+        # Translate center of eyes to center of image
+        eye_center = (eye_L + eye_R) / 2.0 
+        img_center = (tf.cast(tf.shape(rgbImg)[:2], tf.float32) - 1.) / 2.0 
+        rgbImg = tf.contrib.image.translate(rgbImg, img_center - eye_center)
+
+        # Rotate so that left and right eye have same height
+        theta = tf.math.atan( - (eye_R[1] - eye_L[1]) / (eye_R[0] - eye_L[0]) )
+        rgbImg = tf.contrib.image.rotate(rgbImg, -theta, interpolation='BILINEAR')
+
+        # Scale so that distance between top & bottom-most landmarks
+        # are as desired
+        minmax_template = (tf.constant(MINMAX_TEMPLATE) - 0.5) * face_img_ratio + 0.5
+        desired_face_height = imgDim * (
+            tf.reduce_max(minmax_template[:,1]) - 
+            tf.reduce_min(minmax_template[:,1])
+        )
+        scale = face_img_ratio * desired_face_height / face_height
+        rgbImg = tf.image.resize_images(
+            rgbImg,
+            tf.cast(scale * tf.cast(rgbImg.shape[:2], tf.float32), tf.int32)
+        )
+        new_img_center = tf.dtypes.cast(scale * img_center, tf.int32) 
+
+        # Crop to the relevant part of the image (imgDim x imgDim x 3)
+        rgbImg = tf.slice(
+            rgbImg,
+            begin = tf.concat([new_img_center - imgDim // 2, [0]], 0),
+            size = [imgDim, imgDim, 3]
+        )
+        return rgbImg
 
 def write(vals, fName):
     if os.path.isfile(fName):
